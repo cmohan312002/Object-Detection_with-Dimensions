@@ -1,0 +1,12 @@
+build-*/
+*.user
+*.pro.user
+*.autosave
+*.qmlproject.user
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.log
