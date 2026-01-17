@@ -1,3 +1,4 @@
+
 #include "widget.h"
 
 #include <QPainter>
@@ -5,56 +6,12 @@
 #include <QHBoxLayout>
 #include <QDebug>
 
+
+
 /* ===================== CONSTANTS ===================== */
-static const int A4_W = 2480;   // pixels
-static const int A4_H = 3508;   // pixels
-
-/* ===================== HELPER FUNCTIONS ===================== */
-
-// Build QPainterPath by sampling contour every ~1mm
-static QPainterPath buildPathFromContour(
-    const std::vector<cv::Point> &contour,
-    double stepPx
-    ) {
-    QPainterPath path;
-    if (contour.empty()) return path;
-
-    QPointF prev(contour[0].x, contour[0].y);
-    path.moveTo(prev);
-
-    double acc = 0.0;
-
-    for (size_t i = 1; i < contour.size(); ++i) {
-        QPointF curr(contour[i].x, contour[i].y);
-        double d = QLineF(prev, curr).length();
-        acc += d;
-
-        if (acc >= stepPx) {
-            path.lineTo(curr);
-            acc = 0.0;
-        }
-        prev = curr;
-    }
-
-    path.closeSubpath();
-    return path;
-}
-
-// Dump painter path commands
-void Widget::dumpPainterPath(const QPainterPath &path, int index)
-{
-    qDebug() << "========== OBJECT" << index << "==========";
-    for (int i = 0; i < path.elementCount(); ++i) {
-        auto e = path.elementAt(i);
-        if (e.isMoveTo())
-            qDebug() << "moveTo(" << e.x << "," << e.y << ")";
-        else if (e.isLineTo())
-            qDebug() << "lineTo(" << e.x << "," << e.y << ")";
-        else if (e.isCurveTo())
-            qDebug() << "curveTo(" << e.x << "," << e.y << ")";
-    }
-    qDebug() << "====================================";
-}
+static const int A4_W = 2480;
+static const int A4_H = 3508;
+static const int AVERAGE_FRAMES = 5;
 
 
 /* ===================== CONSTRUCTOR ===================== */
@@ -140,6 +97,8 @@ void Widget::captureImage()
 void Widget::resetView()
 {
     objectPaths.clear();
+    measurementHistory.clear();
+    frameMeasures.clear();
     capturedFrame = QImage();
     warpedA4 = QImage();
     currentState = LiveView;
@@ -151,6 +110,7 @@ void Widget::resetView()
 void Widget::runDetection()
 {
     objectPaths.clear();
+    frameMeasures.clear();
 
     if (!detectAndWarpA4(capturedFrame)) {
         qDebug() << "❌ A4 not detected";
@@ -158,6 +118,12 @@ void Widget::runDetection()
     }
 
     detectObjectsInsideA4(warpedA4);
+
+    measurementHistory.push_back(frameMeasures);
+    if (measurementHistory.size() > AVERAGE_FRAMES)
+        measurementHistory.erase(measurementHistory.begin());
+
+    computeAveragedResults();
 
     currentState = DetectedView;
     updateUI();
@@ -178,13 +144,13 @@ bool Widget::detectAndWarpA4(const QImage &image)
 
     cv::inRange(
         hsv,
-        cv::Scalar(0, 0, 150),
+        cv::Scalar(0, 0, 140),
         cv::Scalar(180, 80, 255),
         mask
         );
 
     cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(11,11));
+        cv::MORPH_RECT, cv::Size(9,9));
     cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
 
     std::vector<std::vector<cv::Point>> contours;
@@ -211,11 +177,12 @@ bool Widget::detectAndWarpA4(const QImage &image)
     if (best.size() != 4) return false;
 
     std::sort(best.begin(), best.end(),
-              [](auto &a, auto &b){ return a.y < b.y; });
+              [](const cv::Point&a,const cv::Point&b){return a.y<b.y;});
 
     cv::Point2f tl,tr,bl,br;
     if (best[0].x < best[1].x) { tl=best[0]; tr=best[1]; }
     else { tl=best[1]; tr=best[0]; }
+
     if (best[2].x < best[3].x) { bl=best[2]; br=best[3]; }
     else { bl=best[3]; br=best[2]; }
 
@@ -237,7 +204,7 @@ bool Widget::detectAndWarpA4(const QImage &image)
     return true;
 }
 
-/* ===================== OBJECT DETECTION ===================== */
+/* ===================== OBJECTS ===================== */
 void Widget::detectObjectsInsideA4(const QImage &img)
 {
     cv::Mat src(img.height(), img.width(),
@@ -245,48 +212,105 @@ void Widget::detectObjectsInsideA4(const QImage &img)
 
     cv::Mat gray, bin;
     cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
-
-    // Apply Gaussian blur to reduce noise
-    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0);
-
-    cv::adaptiveThreshold(
-        gray, bin, 255,
-        cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv::THRESH_BINARY_INV,
-        31, 7
-        );
+    cv::adaptiveThreshold(gray, bin, 255,
+                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                          cv::THRESH_BINARY_INV, 31, 7);
 
     cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(5,5));
+        cv::MORPH_RECT, cv::Size(7,7));
     cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, kernel);
 
     std::vector<std::vector<cv::Point>> contours;
-    std::vector<cv::Vec4i> hierarchy;
+    cv::findContours(bin, contours,
+                     cv::RETR_EXTERNAL,
+                     cv::CHAIN_APPROX_NONE);
 
-    cv::findContours(
-        bin, contours, hierarchy,
-        cv::RETR_TREE,
-        cv::CHAIN_APPROX_NONE
-        );
+    for (auto &c : contours) {
+        double area = cv::contourArea(c);
+        if (area < 1500) continue;
 
-    double stepPx = pixelsPerMM * 1.0; // 1mm resolution
-    int index = 1;
+        std::vector<cv::Point> approx;
+        cv::approxPolyDP(c, approx,
+                         0.008 * cv::arcLength(c,true), true);
+        if (approx.size() < 3) continue;
 
-    for (size_t i = 0; i < contours.size(); ++i)
-    {
-        // Skip if this contour has a parent (it's a hole/inner contour)
-        // hierarchy[i][3] contains parent index (-1 means no parent)
-        if (hierarchy[i][3] != -1) continue;
-
-        double area = cv::contourArea(contours[i]);
-        if (area < 2000) continue;
-        if (area > img.width()*img.height()*0.9) continue;
-
-        QPainterPath path =
-            buildPathFromContour(contours[i], stepPx);
+        QPainterPath path;
+        path.moveTo(approx[0].x, approx[0].y);
+        for (size_t i=1;i<approx.size();++i)
+            path.lineTo(approx[i].x, approx[i].y);
+        path.closeSubpath();
 
         objectPaths.push_back(path);
-        dumpPainterPath(path, index++);
+        dumpPainterPath(path, objectPaths.size());
+
+
+
+        cv::RotatedRect rr = cv::minAreaRect(c);
+        ObjectMeasure m;
+        m.widthMM = rr.size.width / pixelsPerMM;
+        m.heightMM = rr.size.height / pixelsPerMM;
+        frameMeasures.push_back(m);
+    }
+}
+
+void Widget::dumpPainterPath(const QPainterPath &path, int objectIndex)
+{
+    qDebug() << "================ OBJECT" << objectIndex << "================";
+
+    for (int i = 0; i < path.elementCount(); ++i)
+    {
+        QPainterPath::Element e = path.elementAt(i);
+
+        if (e.type == QPainterPath::MoveToElement)
+        {
+            qDebug().nospace()
+            << "moveTo("
+            << e.x << ", "
+            << e.y << ")";
+        }
+        else if (e.type == QPainterPath::LineToElement)
+        {
+            qDebug().nospace()
+            << "lineTo("
+            << e.x << ", "
+            << e.y << ")";
+        }
+        else if (e.type == QPainterPath::CurveToElement)
+        {
+            QPainterPath::Element c1 = path.elementAt(i);
+            QPainterPath::Element c2 = path.elementAt(i + 1);
+            QPainterPath::Element end = path.elementAt(i + 2);
+
+            qDebug().nospace()
+                << "cubicTo("
+                << c1.x << ", " << c1.y << ", "
+                << c2.x << ", " << c2.y << ", "
+                << end.x << ", " << end.y << ")";
+
+            i += 2; // skip curve control points
+        }
+    }
+
+    qDebug() << "============================================";
+}
+
+
+/* ===================== AVERAGE ===================== */
+void Widget::computeAveragedResults()
+{
+    if (measurementHistory.empty()) return;
+
+    for (size_t i=0;i<measurementHistory[0].size();++i) {
+        double w=0,h=0; int c=0;
+        for (auto &f:measurementHistory) {
+            if (i>=f.size()) continue;
+            w+=f[i].widthMM;
+            h+=f[i].heightMM;
+            c++;
+        }
+        qDebug() << "AVG OBJECT"
+                 << "W(mm)=" << (w/c)
+                 << "H(mm)=" << (h/c);
     }
 }
 
@@ -296,20 +320,34 @@ void Widget::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    QImage img = (currentState==LiveView)?liveFrame:
-                     (currentState==CapturedView)?capturedFrame:
-                     warpedA4;
+    QImage img;
+
+    if (currentState == LiveView)
+        img = liveFrame;
+    else if (currentState == CapturedView)
+        img = capturedFrame;
+    else
+        img = warpedA4;   // 🔥 ONLY warped A4 for detected view
 
     if (img.isNull()) return;
 
+    // 🔥 KEEP ASPECT RATIO
+    double sx = width()  / double(img.width());
+    double sy = height() / double(img.height());
+    double scale = std::min(sx, sy);
 
-    p.scale(width()/double(img.width()),
-            height()/double(img.height()));
-    p.drawImage(0,0,img);
+    double ox = (width()  - img.width()  * scale) * 0.5;
+    double oy = (height() - img.height() * scale) * 0.5;
+
+    p.translate(ox, oy);
+    p.scale(scale, scale);
+
+    p.drawImage(0, 0, img);
 
     if (showOverlayCheck->isChecked()) {
-        p.setPen(QPen(Qt::red,3));
-        for (auto &path:objectPaths)
+        p.setPen(QPen(Qt::red, 2));
+        for (const auto &path : objectPaths)
             p.drawPath(path);
     }
 }
+
