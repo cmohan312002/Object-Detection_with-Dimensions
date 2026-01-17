@@ -246,6 +246,9 @@ void Widget::detectObjectsInsideA4(const QImage &img)
     cv::Mat gray, bin;
     cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
 
+    // Apply Gaussian blur to reduce noise
+    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0);
+
     cv::adaptiveThreshold(
         gray, bin, 255,
         cv::ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -271,6 +274,10 @@ void Widget::detectObjectsInsideA4(const QImage &img)
 
     for (size_t i = 0; i < contours.size(); ++i)
     {
+        // Skip if this contour has a parent (it's a hole/inner contour)
+        // hierarchy[i][3] contains parent index (-1 means no parent)
+        if (hierarchy[i][3] != -1) continue;
+
         double area = cv::contourArea(contours[i]);
         if (area < 2000) continue;
         if (area > img.width()*img.height()*0.9) continue;
@@ -280,7 +287,6 @@ void Widget::detectObjectsInsideA4(const QImage &img)
 
         objectPaths.push_back(path);
         dumpPainterPath(path, index++);
-
     }
 }
 
