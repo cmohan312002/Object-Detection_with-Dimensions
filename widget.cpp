@@ -113,7 +113,7 @@ void Widget::runDetection()
     frameMeasures.clear();
 
     if (!detectAndWarpA4(capturedFrame)) {
-        qDebug() << "❌ A4 not detected";
+        qDebug() << " A4 not detected";
         return;
     }
 
@@ -207,50 +207,93 @@ bool Widget::detectAndWarpA4(const QImage &image)
 /* ===================== OBJECTS ===================== */
 void Widget::detectObjectsInsideA4(const QImage &img)
 {
+    objectPaths.clear();
+
     cv::Mat src(img.height(), img.width(),
                 CV_8UC3, (void*)img.bits(), img.bytesPerLine());
 
+    /* ---------- 1. BINARIZE ---------- */
     cv::Mat gray, bin;
     cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
-    cv::adaptiveThreshold(gray, bin, 255,
-                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-                          cv::THRESH_BINARY_INV, 31, 7);
+    cv::GaussianBlur(gray, gray, cv::Size(5,5), 0);
 
+    cv::adaptiveThreshold(
+        gray, bin, 255,
+        cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv::THRESH_BINARY_INV,
+        31, 7
+        );
+
+    /* ---------- 2. CLOSE GAPS (NOT THICKEN) ---------- */
     cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(7,7));
+        cv::MORPH_RECT, cv::Size(3,3));
     cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, kernel);
 
+    /* ---------- 3. FIND CONTOURS WITH HIERARCHY ---------- */
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(bin, contours,
-                     cv::RETR_EXTERNAL,
-                     cv::CHAIN_APPROX_NONE);
+    std::vector<cv::Vec4i> hierarchy;
 
-    for (auto &c : contours) {
-        double area = cv::contourArea(c);
-        if (area < 1500) continue;
+    cv::findContours(
+        bin,
+        contours,
+        hierarchy,
+        cv::RETR_TREE,              // 🔥 REQUIRED
+        cv::CHAIN_APPROX_NONE
+        );
 
+    double stepPx = pixelsPerMM * 1.0; // 1mm resolution
+    int index = 1;
+
+    /* ---------- 4. PROCESS ONLY VALID CONTOURS ---------- */
+    for (size_t i = 0; i < contours.size(); ++i)
+    {
+        // --- compute hierarchy depth ---
+        int depth = 0;
+        int parent = hierarchy[i][3];
+        while (parent != -1) {
+            depth++;
+            parent = hierarchy[parent][3];
+        }
+
+        // 🔥 KEY RULE:
+        // Even depth = real object / inner object
+        // Odd depth  = stroke duplicate → skip
+        if (depth % 2 != 0)
+            continue;
+
+        double area = cv::contourArea(contours[i]);
+        if (area < 1500)
+            continue;
+
+        if (area > img.width() * img.height() * 0.9)
+            continue;
+
+        /* ---------- 5. SMOOTH CONTOUR ---------- */
         std::vector<cv::Point> approx;
-        cv::approxPolyDP(c, approx,
-                         0.008 * cv::arcLength(c,true), true);
-        if (approx.size() < 3) continue;
+        cv::approxPolyDP(
+            contours[i],
+            approx,
+            pixelsPerMM * 0.6,    // smooth but accurate
+            true
+            );
 
+        if (approx.size() < 3)
+            continue;
+
+        /* ---------- 6. BUILD SINGLE-STROKE PATH ---------- */
         QPainterPath path;
         path.moveTo(approx[0].x, approx[0].y);
-        for (size_t i=1;i<approx.size();++i)
-            path.lineTo(approx[i].x, approx[i].y);
+
+        for (size_t k = 1; k < approx.size(); ++k)
+            path.lineTo(approx[k].x, approx[k].y);
+
         path.closeSubpath();
 
         objectPaths.push_back(path);
-        dumpPainterPath(path, objectPaths.size());
-
-
-
-        cv::RotatedRect rr = cv::minAreaRect(c);
-        ObjectMeasure m;
-        m.widthMM = rr.size.width / pixelsPerMM;
-        m.heightMM = rr.size.height / pixelsPerMM;
-        frameMeasures.push_back(m);
+        dumpPainterPath(path, index++);
     }
+
+    qDebug() << "Objects detected:" << objectPaths.size();
 }
 
 void Widget::dumpPainterPath(const QPainterPath &path, int objectIndex)
