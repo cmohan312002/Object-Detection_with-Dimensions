@@ -50,14 +50,15 @@ using DigitalObject = QVector<DigitalPathCommand>;
 enum ViewState {
     LiveView,
     CapturedView,
-    DetectedView
+    DetectedView,
+    PathOnlyView
 };
 
 /* ===================== MEASURE STRUCT ===================== */
 struct ObjectMeasure {
-    double widthMM = 0.0;
-    double heightMM = 0.0;
-    double diameterMM = 0.0;
+    double widthMM;
+    double heightMM;
+    double areaMM2;
 };
 
 class Widget : public QWidget
@@ -76,6 +77,8 @@ private slots:
     void captureImage();
     void runDetection();
     void resetView();
+    void showPathOnlyView();
+
 
 
 private:
@@ -85,6 +88,8 @@ private:
     QPushButton *detectButton;
     QPushButton *resetButton;
     QCheckBox   *showOverlayCheck;
+    QPushButton *pathOnlyButton;
+
 
     /* Camera */
     QCamera *camera;

@@ -26,11 +26,18 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     resetButton   = new QPushButton("🔄 Reset");
     showOverlayCheck = new QCheckBox("Show Overlay");
     showOverlayCheck->setChecked(true);
+    pathOnlyButton = new QPushButton("🧩 Path Only");
+    pathOnlyButton->setEnabled(currentState == DetectedView);
+
+
+
+
 
     QHBoxLayout *controls = new QHBoxLayout;
     controls->addWidget(startButton);
     controls->addWidget(captureButton);
     controls->addWidget(detectButton);
+    controls->addWidget(pathOnlyButton);
     controls->addWidget(resetButton);
     controls->addWidget(showOverlayCheck);
 
@@ -52,6 +59,9 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     connect(captureButton, &QPushButton::clicked, this, &Widget::captureImage);
     connect(detectButton, &QPushButton::clicked, this, &Widget::runDetection);
     connect(resetButton, &QPushButton::clicked, this, &Widget::resetView);
+    connect(pathOnlyButton, &QPushButton::clicked,
+            this, &Widget::showPathOnlyView);
+
 
     updateUI();
 }
@@ -63,7 +73,11 @@ void Widget::updateUI()
     captureButton->setEnabled(currentState == LiveView);
     detectButton->setEnabled(currentState == CapturedView);
     resetButton->setEnabled(currentState != LiveView);
+    pathOnlyButton->setEnabled(
+        currentState == DetectedView || currentState == PathOnlyView
+        );
 }
+
 
 void Widget::startCamera()
 {
@@ -208,6 +222,7 @@ bool Widget::detectAndWarpA4(const QImage &image)
 void Widget::detectObjectsInsideA4(const QImage &img)
 {
     objectPaths.clear();
+    frameMeasures.clear();
 
     cv::Mat src(img.height(), img.width(),
                 CV_8UC3, (void*)img.bits(), img.bytesPerLine());
@@ -224,12 +239,13 @@ void Widget::detectObjectsInsideA4(const QImage &img)
         31, 7
         );
 
-    /* ---------- 2. CLOSE GAPS (NOT THICKEN) ---------- */
-    cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(3,3));
-    cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, kernel);
+    /* ---------- 2. CLOSE SMALL GAPS ---------- */
+    cv::morphologyEx(
+        bin, bin, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, {3,3})
+        );
 
-    /* ---------- 3. FIND CONTOURS WITH HIERARCHY ---------- */
+    /* ---------- 3. FIND CONTOURS + HIERARCHY ---------- */
     std::vector<std::vector<cv::Point>> contours;
     std::vector<cv::Vec4i> hierarchy;
 
@@ -237,17 +253,16 @@ void Widget::detectObjectsInsideA4(const QImage &img)
         bin,
         contours,
         hierarchy,
-        cv::RETR_TREE,              // 🔥 REQUIRED
+        cv::RETR_TREE,
         cv::CHAIN_APPROX_NONE
         );
 
-    double stepPx = pixelsPerMM * 1.0; // 1mm resolution
     int index = 1;
 
-    /* ---------- 4. PROCESS ONLY VALID CONTOURS ---------- */
+    /* ---------- 4. PROCESS ONLY REAL OBJECTS ---------- */
     for (size_t i = 0; i < contours.size(); ++i)
     {
-        // --- compute hierarchy depth ---
+        // --- hierarchy depth ---
         int depth = 0;
         int parent = hierarchy[i][3];
         while (parent != -1) {
@@ -255,47 +270,59 @@ void Widget::detectObjectsInsideA4(const QImage &img)
             parent = hierarchy[parent][3];
         }
 
-        // 🔥 KEY RULE:
-        // Even depth = real object / inner object
-        // Odd depth  = stroke duplicate → skip
+        // 🔥 Even depth = real object (including inner objects)
         if (depth % 2 != 0)
             continue;
 
-        double area = cv::contourArea(contours[i]);
-        if (area < 1500)
+        double areaPx = cv::contourArea(contours[i]);
+        if (areaPx < 1500)
             continue;
 
-        if (area > img.width() * img.height() * 0.9)
+        if (areaPx > img.width() * img.height() * 0.9)
             continue;
 
-        /* ---------- 5. SMOOTH CONTOUR ---------- */
+        /* ---------- 5. MEASURE OBJECT ---------- */
+        cv::RotatedRect rr = cv::minAreaRect(contours[i]);
+
+        ObjectMeasure m;
+        m.widthMM  = rr.size.width  / pixelsPerMM;
+        m.heightMM = rr.size.height / pixelsPerMM;
+        m.areaMM2  = areaPx / (pixelsPerMM * pixelsPerMM);
+
+        // normalize W >= H
+        if (m.widthMM < m.heightMM)
+            std::swap(m.widthMM, m.heightMM);
+
+        frameMeasures.push_back(m);
+
+        /* ---------- 6. CLEAN PATH FOR DRAWING ---------- */
         std::vector<cv::Point> approx;
         cv::approxPolyDP(
             contours[i],
             approx,
-            pixelsPerMM * 0.6,    // smooth but accurate
+            pixelsPerMM * 0.6,   // smooth but accurate
             true
             );
 
         if (approx.size() < 3)
             continue;
 
-        /* ---------- 6. BUILD SINGLE-STROKE PATH ---------- */
         QPainterPath path;
         path.moveTo(approx[0].x, approx[0].y);
-
         for (size_t k = 1; k < approx.size(); ++k)
             path.lineTo(approx[k].x, approx[k].y);
-
         path.closeSubpath();
 
         objectPaths.push_back(path);
         dumpPainterPath(path, index++);
+
+        qDebug()
+            << "OBJECT"
+            << "W(mm)=" << m.widthMM
+            << "H(mm)=" << m.heightMM
+            << "Area(mm²)=" << m.areaMM2;
     }
-
-    qDebug() << "Objects detected:" << objectPaths.size();
 }
-
 void Widget::dumpPainterPath(const QPainterPath &path, int objectIndex)
 {
     qDebug() << "================ OBJECT" << objectIndex << "================";
@@ -330,7 +357,7 @@ void Widget::dumpPainterPath(const QPainterPath &path, int objectIndex)
                 << c2.x << ", " << c2.y << ", "
                 << end.x << ", " << end.y << ")";
 
-            i += 2; // skip curve control points
+            i += 2;
         }
     }
 
@@ -363,6 +390,36 @@ void Widget::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
+    // ===================== PATH ONLY VIEW =====================
+    if (currentState == PathOnlyView)
+    {
+        // Use A4 logical size
+        QSize logicalSize(A4_W, A4_H);
+
+        double sx = width()  / double(logicalSize.width());
+        double sy = height() / double(logicalSize.height());
+        double scale = std::min(sx, sy);
+
+        double ox = (width()  - logicalSize.width()  * scale) * 0.5;
+        double oy = (height() - logicalSize.height() * scale) * 0.5;
+
+        p.translate(ox, oy);
+        p.scale(scale, scale);
+
+        // Optional white background
+        p.fillRect(0, 0, A4_W, A4_H, Qt::white);
+
+        // Draw ONLY paths
+        p.setPen(QPen(Qt::black, 2));
+        p.setBrush(Qt::NoBrush);
+
+        for (const auto &path : objectPaths)
+            p.drawPath(path);
+
+        return; // 🔥 IMPORTANT
+    }
+
+    // ===================== NORMAL VIEWS =====================
     QImage img;
 
     if (currentState == LiveView)
@@ -370,11 +427,10 @@ void Widget::paintEvent(QPaintEvent *)
     else if (currentState == CapturedView)
         img = capturedFrame;
     else
-        img = warpedA4;   // 🔥 ONLY warped A4 for detected view
+        img = warpedA4;
 
     if (img.isNull()) return;
 
-    // 🔥 KEEP ASPECT RATIO
     double sx = width()  / double(img.width());
     double sy = height() / double(img.height());
     double scale = std::min(sx, sy);
@@ -393,4 +449,17 @@ void Widget::paintEvent(QPaintEvent *)
             p.drawPath(path);
     }
 }
+
+void Widget::showPathOnlyView()
+{
+    if (objectPaths.empty()) {
+        qDebug() << "No paths to display";
+        return;
+    }
+
+    currentState = PathOnlyView;
+    updateUI();
+    update();
+}
+
 
