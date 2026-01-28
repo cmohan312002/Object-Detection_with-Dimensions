@@ -78,6 +78,7 @@ private slots:
     void runDetection();
     void resetView();
     void showPathOnlyView();
+    void exportPathsToJson();
 
 
 
@@ -89,6 +90,7 @@ private:
     QPushButton *resetButton;
     QCheckBox   *showOverlayCheck;
     QPushButton *pathOnlyButton;
+    QPushButton *exportButton;
 
 
     /* Camera */

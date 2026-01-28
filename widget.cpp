@@ -5,6 +5,11 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QFile>
+
 
 
 
@@ -28,6 +33,11 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     showOverlayCheck->setChecked(true);
     pathOnlyButton = new QPushButton("🧩 Path Only");
     pathOnlyButton->setEnabled(currentState == DetectedView);
+    exportButton = new QPushButton("💾 Export Path (JSON)");
+
+
+
+
 
 
 
@@ -39,6 +49,7 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     controls->addWidget(detectButton);
     controls->addWidget(pathOnlyButton);
     controls->addWidget(resetButton);
+    controls->addWidget(exportButton);
     controls->addWidget(showOverlayCheck);
 
     QVBoxLayout *layout = new QVBoxLayout(this);
@@ -61,6 +72,8 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     connect(resetButton, &QPushButton::clicked, this, &Widget::resetView);
     connect(pathOnlyButton, &QPushButton::clicked,
             this, &Widget::showPathOnlyView);
+    connect(exportButton, &QPushButton::clicked,
+            this, &Widget::exportPathsToJson);
 
 
     updateUI();
@@ -76,6 +89,9 @@ void Widget::updateUI()
     pathOnlyButton->setEnabled(
         currentState == DetectedView || currentState == PathOnlyView
         );
+    exportButton->setEnabled(currentState == DetectedView
+                             || currentState == PathOnlyView);
+
 }
 
 
@@ -461,5 +477,97 @@ void Widget::showPathOnlyView()
     updateUI();
     update();
 }
+
+void Widget::exportPathsToJson()
+{
+    if (objectPaths.empty()) {
+        qDebug() << "No paths to export";
+        return;
+    }
+
+    QJsonObject root;
+    root["unit"] = "mm";
+    root["pixelsPerMM"] = pixelsPerMM;
+
+    QJsonObject canvas;
+    canvas["width_mm"]  = 210;
+    canvas["height_mm"] = 297;
+    root["canvas"] = canvas;
+
+    QJsonArray objectsArray;
+
+    for (int i = 0; i < objectPaths.size(); ++i)
+    {
+        const QPainterPath &path = objectPaths[i];
+
+        QJsonObject obj;
+        obj["id"] = i + 1;
+
+        QJsonArray pathArray;
+
+        for (int e = 0; e < path.elementCount(); ++e)
+        {
+            QPainterPath::Element el = path.elementAt(e);
+
+            QJsonObject cmd;
+
+            double xMM = el.x / pixelsPerMM;
+            double yMM = el.y / pixelsPerMM;
+
+            if (el.type == QPainterPath::MoveToElement)
+            {
+                cmd["cmd"] = "M";
+                cmd["x"] = xMM;
+                cmd["y"] = yMM;
+            }
+            else if (el.type == QPainterPath::LineToElement)
+            {
+                cmd["cmd"] = "L";
+                cmd["x"] = xMM;
+                cmd["y"] = yMM;
+            }
+            else if (el.type == QPainterPath::CurveToElement)
+            {
+                QPainterPath::Element c1 = path.elementAt(e);
+                QPainterPath::Element c2 = path.elementAt(e + 1);
+                QPainterPath::Element end = path.elementAt(e + 2);
+
+                cmd["cmd"] = "C";
+                cmd["x1"] = c1.x / pixelsPerMM;
+                cmd["y1"] = c1.y / pixelsPerMM;
+                cmd["x2"] = c2.x / pixelsPerMM;
+                cmd["y2"] = c2.y / pixelsPerMM;
+                cmd["x"]  = end.x / pixelsPerMM;
+                cmd["y"]  = end.y / pixelsPerMM;
+
+                e += 2; // skip control points
+            }
+
+            pathArray.append(cmd);
+        }
+
+        // Close path
+        QJsonObject closeCmd;
+        closeCmd["cmd"] = "Z";
+        pathArray.append(closeCmd);
+
+        obj["path"] = pathArray;
+        objectsArray.append(obj);
+    }
+
+    root["objects"] = objectsArray;
+
+    QFile file("exported_paths.json");
+    if (!file.open(QIODevice::WriteOnly)) {
+        qDebug() << "Failed to write JSON";
+        return;
+    }
+
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    file.close();
+
+    qDebug() << "✅ Paths exported to exported_paths.json";
+}
+
 
 
