@@ -1,4 +1,5 @@
 
+
 #include "widget.h"
 
 #include <QPainter>
@@ -34,12 +35,6 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     pathOnlyButton = new QPushButton("🧩 Path Only");
     pathOnlyButton->setEnabled(currentState == DetectedView);
     exportButton = new QPushButton("💾 Export Path (JSON)");
-
-
-
-
-
-
 
 
 
@@ -566,7 +561,7 @@ void Widget::exportPathsToJson()
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     file.close();
 
-    qDebug() << "✅ Paths exported to exported_paths.json";
+    qDebug() << "Paths exported to exported_paths.json";
 }
 
 
