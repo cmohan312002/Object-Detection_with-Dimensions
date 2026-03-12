@@ -299,6 +299,7 @@ void Widget::detectObjectsInsideA4(const QImage &img)
         m.widthMM  = rr.size.width  / pixelsPerMM;
         m.heightMM = rr.size.height / pixelsPerMM;
         m.areaMM2  = areaPx / (pixelsPerMM * pixelsPerMM);
+        m.center   = QPointF(rr.center.x, rr.center.y);
 
         // normalize W >= H
         if (m.widthMM < m.heightMM)
@@ -424,8 +425,38 @@ void Widget::paintEvent(QPaintEvent *)
         p.setPen(QPen(Qt::black, 2));
         p.setBrush(Qt::NoBrush);
 
-        for (const auto &path : objectPaths)
-            p.drawPath(path);
+        for (int i = 0; i < objectPaths.size(); i++)
+        {
+            p.drawPath(objectPaths[i]);
+
+            if (i < frameMeasures.size())
+            {
+                const auto &m = frameMeasures[i];
+
+                QString text = QString("%1 × %2 mm")
+                                   .arg(m.widthMM,0,'f',1)
+                                   .arg(m.heightMM,0,'f',1);
+
+                p.setFont(QFont("Arial",24,QFont::Bold));
+
+                QFontMetrics fm(p.font());
+                QRect r = fm.boundingRect(text);
+
+                QRect bg(
+                    m.center.x() - r.width()/2 - 10,
+                    m.center.y() - r.height()/2 - 10,
+                    r.width() + 20,
+                    r.height() + 20
+                    );
+
+                p.setPen(Qt::NoPen);
+                p.setBrush(Qt::white);
+                p.drawRoundedRect(bg,8,8);
+
+                p.setPen(Qt::black);
+                p.drawText(bg, Qt::AlignCenter, text);
+            }
+        }
 
         return; // 🔥 IMPORTANT
     }
@@ -456,8 +487,38 @@ void Widget::paintEvent(QPaintEvent *)
 
     if (showOverlayCheck->isChecked()) {
         p.setPen(QPen(Qt::red, 2));
-        for (const auto &path : objectPaths)
-            p.drawPath(path);
+        for (int i = 0; i < objectPaths.size(); i++)
+        {
+            p.drawPath(objectPaths[i]);
+
+            if (i < frameMeasures.size())
+            {
+                const auto &m = frameMeasures[i];
+
+                QString text = QString("%1 × %2 mm")
+                                   .arg(m.widthMM,0,'f',1)
+                                   .arg(m.heightMM,0,'f',1);
+
+                p.setFont(QFont("Arial",16,QFont::Bold));
+
+                QFontMetrics fm(p.font());
+                QRect r = fm.boundingRect(text);
+
+                QRect bg(
+                    m.center.x() - r.width()/2 - 6,
+                    m.center.y() - r.height()/2 - 6,
+                    r.width() + 12,
+                    r.height() + 12
+                    );
+
+                p.setPen(Qt::NoPen);
+                p.setBrush(QColor(255,255,255,220));
+                p.drawRoundedRect(bg,6,6);
+
+                p.setPen(Qt::black);
+                p.drawText(bg, Qt::AlignCenter, text);
+            }
+        }
     }
 }
 

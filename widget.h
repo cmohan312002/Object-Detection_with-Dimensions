@@ -59,6 +59,9 @@ struct ObjectMeasure {
     double widthMM;
     double heightMM;
     double areaMM2;
+
+    QPointF center;
+    cv::RotatedRect rect;
 };
 
 class Widget : public QWidget
