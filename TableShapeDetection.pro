@@ -1,6 +1,7 @@
 QT += core gui widgets multimedia multimediawidgets
 CONFIG += c++17
-
+TARGET  = A4Digitizer
+TEMPLATE = app
 INCLUDEPATH += C:/opencv-mingw/OpenCV-MinGW-Build-OpenCV-4.5.5-x64/include
 
 LIBS += -LC:/opencv-mingw/OpenCV-MinGW-Build-OpenCV-4.5.5-x64/x64/mingw/lib \
@@ -18,3 +19,4 @@ HEADERS += \
 
 DISTFILES += \
     .gitignore
+DEFINES += QT_DEPRECATED_WARNINGS

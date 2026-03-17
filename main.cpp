@@ -3,8 +3,12 @@
 
 int main(int argc, char *argv[])
 {
-    QApplication a(argc, argv);
+    QApplication app(argc, argv);
+    app.setApplicationName("A4 Object Digitizer");
+    app.setApplicationVersion("2.0");
+    app.setOrganizationName("VisionLab");
+
     Widget w;
     w.show();
-    return a.exec();
+    return app.exec();
 }
