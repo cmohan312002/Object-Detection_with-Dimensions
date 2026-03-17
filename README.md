@@ -114,7 +114,7 @@ VisionMeasure/
 
 ```bash id="run1"
 # Clone the repository
-git clone https://github.com/your-username/VisionMeasure.git
+git clone https://github.com/cmohan312002/Object-Detection_with-Dimensions.git
 
 # Open in Qt Creator
 # Build and run the project
@@ -156,7 +156,7 @@ Unlike basic object detection systems, VisionMeasure:
 ## 👨‍💻 Author
 
 **Mohan Chilivery**
-Software Engineer | MCA Student | Full Stack Developer
+Programmer
 
 ---
 
