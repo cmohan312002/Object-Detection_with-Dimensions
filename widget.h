@@ -24,6 +24,9 @@
 #include <array>
 #include <optional>
 
+class FrameProcessor;
+class QThread;
+
 /* ─────────────────────────────────────────────────────────────────────────
    Physical A4 constants (ISO 216)
    ───────────────────────────────────────────────────────────────────────── */
@@ -77,6 +80,8 @@ class Widget : public QWidget
 public:
     explicit Widget(QWidget *parent = nullptr);
     ~Widget() override = default;
+signals:   // ✅ HERE (inside class, not outside)
+    void sendFrameToProcessor(QImage frame);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -101,7 +106,12 @@ private slots:
     void onFrameChanged(const QVideoFrame &frame);
     void onAutoDetectTimer();
 
+    void onA4Processed(bool locked, std::vector<cv::Point2f> quad);
+
 private:
+
+    FrameProcessor *processor = nullptr;
+    QThread *workerThread = nullptr;
     /* ── UI ── */
     void buildUI();
     void applyTheme();
@@ -207,4 +217,19 @@ private:
     QTimer *autoTimer = nullptr;
 
     int selectedObject = -1;
+};
+
+class FrameProcessor : public QObject
+{
+    Q_OBJECT
+
+public:
+    bool a4Locked = false;
+    int lockCount = 0;
+
+public slots:
+    void processFrame(QImage frame);
+
+signals:
+    void resultReady(bool locked, std::vector<cv::Point2f> quad);
 };
