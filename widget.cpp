@@ -1,18 +1,4 @@
-/*
- * ═══════════════════════════════════════════════════════════════════════════
- *   A4 Object Digitizer  –  widget.cpp  (v3 – with lens calibration)
- *
- *   Calibration pipeline:
- *     Print a 9×6 checkerboard (25 mm squares) → enter Calibrate mode →
- *     show board from 15+ angles → Finish & Apply →
- *     distortion coefficients saved to camera_calib.yml →
- *     every subsequent frame is undistorted before processing
- *
- *   Accuracy improvement:
- *     Without calibration: corner measurements 3-8 % larger than reality
- *     With calibration:    reprojection error < 0.5 px → < 0.05 mm error
- * ═══════════════════════════════════════════════════════════════════════════
- */
+
 
 #include "widget.h"
 
@@ -29,12 +15,12 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QFile>
+#include <QDir>
 #include <QDateTime>
 #include <QStandardPaths>
 #include <QDebug>
 #include <QTimer>
 #include <QMessageBox>
-#include <QDir>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc.hpp>
@@ -42,18 +28,20 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
+// #include <numeric>
+
+#include <QThread>
 
 /* ─── Colour palette (white & orange) ──────────────────────────────────── */
 namespace C {
 static const QColor BG       {245, 245, 242};
-static const QColor SURFACE  {255, 255, 255};
+// static const QColor SURFACE  {255, 255, 255};
 static const QColor BORDER   {220, 210, 200};
-static const QColor ACCENT   {235,  95,  20};   // deep orange
-static const QColor ACCENT2  {255, 140,  50};
+// static const QColor ACCENT   {235,  95,  20};   // deep orange
+// static const QColor ACCENT2  {255, 140,  50};
 static const QColor SUCCESS  { 34, 160,  80};
-static const QColor WARNING  {235, 150,   0};
-static const QColor DANGER   {210,  45,  45};
+// static const QColor WARNING  {235, 150,   0};
+// static const QColor DANGER   {210,  45,  45};
 static const QColor TEXT_PRI { 30,  30,  30};
 static const QColor TEXT_SEC {110, 100,  90};
 
@@ -66,6 +54,7 @@ static const std::array<QColor,6> OBJ_COLORS {{
     { 20, 170, 170},   // teal
 }};
 }
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Constructor
@@ -91,10 +80,25 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
     captureSession->setVideoSink(videoSink);
     connect(videoSink, &QVideoSink::videoFrameChanged,
             this,      &Widget::onFrameChanged);
+    // ================= THREAD SETUP =================
+    processor = new FrameProcessor();
+    workerThread = new QThread(this);
+
+    processor->moveToThread(workerThread);
+    workerThread->start();
+
+    connect(this, &Widget::sendFrameToProcessor,
+            processor, &FrameProcessor::processFrame);
+
+    connect(processor, &FrameProcessor::resultReady,
+            this, &Widget::onA4Processed);
 
     autoTimer = new QTimer(this);
-    autoTimer->setInterval(200);
+    autoTimer->setInterval(400);
     connect(autoTimer, &QTimer::timeout, this, &Widget::onAutoDetectTimer);
+
+
+
 
     /* Enumerate cameras after event loop starts */
     QTimer::singleShot(0, this, [this](){
@@ -117,8 +121,64 @@ Widget::Widget(QWidget *parent) : QWidget(parent)
                 this, &Widget::selectCamera);
         updateUI();
     });
-}
 
+
+}
+void FrameProcessor::processFrame(QImage frame)
+{
+    if (frame.isNull()) return;
+
+    cv::Mat src(frame.height(), frame.width(),
+                CV_8UC4, (void*)frame.bits(), frame.bytesPerLine());
+
+    cv::Mat bgr;
+    cv::cvtColor(src, bgr, cv::COLOR_BGRA2BGR);
+
+    cv::resize(bgr, bgr, cv::Size(), 0.5, 0.5);
+
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+
+    cv::Mat edges;
+    cv::Canny(gray, edges, 50, 150);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(edges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<cv::Point2f> quad;
+    double bestArea = 0;
+
+    for (auto &c : contours)
+    {
+        std::vector<cv::Point> approx;
+        cv::approxPolyDP(c, approx, 0.02 * cv::arcLength(c, true), true);
+
+        if (approx.size() == 4 && cv::isContourConvex(approx))
+        {
+            double area = cv::contourArea(approx);
+            if (area > bestArea)
+            {
+                bestArea = area;
+                quad = {approx[0], approx[1], approx[2], approx[3]};
+            }
+        }
+    }
+
+    bool found = (quad.size() == 4);
+
+    if (found)
+    {
+        lockCount++;
+        if (lockCount >= 3) a4Locked = true;
+    }
+    else
+    {
+        lockCount = 0;
+        a4Locked = false;
+    }
+
+    emit resultReady(a4Locked, quad);
+}
 /* ═══════════════════════════════════════════════════════════════════════════
    Build UI
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -152,7 +212,7 @@ void Widget::buildUI()
     chkOverlay    = new QCheckBox("Overlay",     this);
     chkAutoDetect = new QCheckBox("Auto A4",     this);
     chkOverlay   ->setChecked(true);
-    chkAutoDetect->setChecked(true);
+    chkAutoDetect->setChecked(false);
 
     lblStatus     = new QLabel("Initialising…", this);
     lblA4Lock     = new QLabel("A4: –",          this);
@@ -394,6 +454,10 @@ void Widget::startCamera()
 
 void Widget::onFrameChanged(const QVideoFrame &frame)
 {
+    static int skip = 0;
+    skip++;
+
+    if (skip % 2 != 0) return;
     if (!frame.isValid()) return;
     if (currentState != LiveView && currentState != Calibrating) return;
     QVideoFrame f(frame);
@@ -413,26 +477,9 @@ void Widget::onFrameChanged(const QVideoFrame &frame)
 void Widget::onAutoDetectTimer()
 {
     if (liveFrame.isNull() || currentState != LiveView) return;
-    cv::Mat src(liveFrame.height(), liveFrame.width(),
-                CV_8UC4, (void*)liveFrame.bits(), liveFrame.bytesPerLine());
-    cv::Mat bgr;
-    cv::cvtColor(src, bgr, cv::COLOR_BGRA2BGR);
-    /* Apply undistortion if calibrated */
-    if (isCalibrated()) bgr = undistortFrame(bgr);
-    cv::Mat warped;
-    bool found = tryHsvMethod(bgr, warped) ||
-                 tryCannyMethod(bgr, warped) ||
-                 tryAdaptiveMethod(bgr, warped);
-    if (found) { quadLockCount = std::min(quadLockCount+1, 5); a4Locked = (quadLockCount>=3); }
-    else       { quadLockCount = std::max(quadLockCount-1, 0); if (!quadLockCount) a4Locked=false; }
-    if (a4Locked) {
-        lblA4Lock->setText("A4: ✓ Locked");
-        lblA4Lock->setStyleSheet("color:#1a6e3a;font-size:11px;font-weight:bold;");
-    } else {
-        lblA4Lock->setText(found ? "A4: ~ Acquiring…" : "A4: ✗ Not found");
-        lblA4Lock->setStyleSheet(found ?
-                                     "color:#eb8c00;font-size:11px;" : "color:#d42d2d;font-size:11px;");
-    }
+
+    // 🚀 send to worker instead of processing here
+    emit sendFrameToProcessor(liveFrame);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -511,7 +558,24 @@ void Widget::startCalibration()
     updateUI();
     update();
 }
+void Widget::onA4Processed(bool locked, std::vector<cv::Point2f> quad)
+{
+    a4Locked = locked;
+    lastQuad = quad;
 
+    if (a4Locked)
+    {
+        lblA4Lock->setText("A4: ✓ Locked");
+        lblA4Lock->setStyleSheet("color:#1a6e3a;font-weight:bold;");
+    }
+    else
+    {
+        lblA4Lock->setText("A4: Searching...");
+        lblA4Lock->setStyleSheet("color:#eb8c00;");
+    }
+
+    update();
+}
 void Widget::collectCalibFrame()
 {
     if (liveFrame.isNull()) return;
@@ -955,16 +1019,28 @@ void Widget::exportPathsToJson()
         const auto &obj = objects[i];
         const auto &m   = obj.measure;
         QJsonObject jo;
-        jo["id"]       = i+1;
-        jo["shape"]    = m.shapeLabel;
-        jo["width_mm"] = qRound(m.widthMM *100)/100.0;
-        jo["height_mm"]= qRound(m.heightMM*100)/100.0;
-        jo["area_mm2"] = qRound(m.areaMM2 * 10)/ 10.0;
-        jo["perim_mm"] = qRound(m.perimMM * 10)/ 10.0;
-        jo["angle_deg"]= qRound(m.angleDeg* 10)/ 10.0;
-        QJsonObject cen; cen["x_mm"]=qRound(m.centerMM.x()*100)/100.0;
-        cen["y_mm"]=qRound(m.centerMM.y()*100)/100.0;
-        jo["center"] = cen;
+        jo["id"]    = i+1;
+        jo["shape"] = m.shapeLabel;
+
+        /* ── Dimensions block – all measurements in mm ── */
+        QJsonObject dim;
+        dim["width_mm"]      = qRound(m.widthMM  * 100) / 100.0;
+        dim["height_mm"]     = qRound(m.heightMM * 100) / 100.0;
+        dim["diagonal_mm"]   = qRound(std::sqrt(m.widthMM*m.widthMM +
+                                              m.heightMM*m.heightMM) * 100) / 100.0;
+        dim["perimeter_mm"]  = qRound(m.perimMM  * 10)  / 10.0;
+        dim["area_mm2"]      = qRound(m.areaMM2  * 10)  / 10.0;
+        dim["aspect_ratio"]  = (m.heightMM > 0)
+                                  ? qRound((m.widthMM / m.heightMM) * 1000) / 1000.0
+                                  : 0.0;
+        dim["angle_deg"]     = qRound(m.angleDeg * 10)  / 10.0;
+        jo["dimensions"] = dim;
+
+        /* ── Centre position on A4 sheet ── */
+        QJsonObject cen;
+        cen["x_mm"] = qRound(m.centerMM.x() * 100) / 100.0;
+        cen["y_mm"] = qRound(m.centerMM.y() * 100) / 100.0;
+        jo["center_on_sheet"] = cen;
 
         QJsonArray pa;
         auto r2=[](double v){return qRound(v*100)/100.0;};
@@ -1217,4 +1293,3 @@ void Widget::drawPathOnlyView(QPainter &p, const QRect &vp)
     p.restore();
 }
 
-/* End of widget.cpp */
